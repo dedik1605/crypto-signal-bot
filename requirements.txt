@@ -1,7 +1,6 @@
 ccxt==4.2.78
-pandas==2.1.4
+pandas==2.0.3
 numpy==1.24.3
 python-telegram-bot==20.7
-flask==3.0.0
+flask==2.3.3
 requests==2.31.0
-gunicorn==21.2.0

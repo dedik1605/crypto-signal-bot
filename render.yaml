@@ -1,3 +1,4 @@
+
 services:
   - type: web
     name: crypto-signals-bot
@@ -10,3 +11,4 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+    healthCheckPath: /health

@@ -1,16 +1,13 @@
-import ccxt
-import pandas as pd
-import numpy as np
-import asyncio
+import os
 import time
 import logging
-import os
-from telegram import Bot
-from telegram.error import TelegramError
-from flask import Flask
+import asyncio
 import threading
+from flask import Flask
+import requests
+import json
 
-# Create Flask app for health checks
+# Create Flask app
 app = Flask(__name__)
 
 @app.route('/')
@@ -18,7 +15,7 @@ def home():
     return """
     <h1>🤖 Crypto Signals Bot</h1>
     <p>Bot is running and monitoring markets 24/7</p>
-    <p>Monitoring: BTC, ETH, SOL, DASH, ZEC</p>
+    <p>Monitoring: BTC, ETH, SOL</p>
     <p>Check <a href="/health">/health</a> for status</p>
     """
 
@@ -30,59 +27,95 @@ def health():
 TELEGRAM_BOT_TOKEN = os.environ.get('8343470341:AAHwY8NIaHgHLI2uPHnFQrf3m5F98KkQQBc')
 TELEGRAM_CHAT_ID = os.environ.get('601403175')
 
-# Validate required environment variables
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError("❌ Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables")
+    raise ValueError("❌ Missing Telegram credentials")
 
 SYMBOLS = {
-    'BTC': 'BTC/USDT:USDT',
-    'ETH': 'ETH/USDT:USDT', 
-    'SOL': 'SOL/USDT:USDT',
-    'DASH': 'DASH/USDT:USDT',
-    'ZEC': 'ZEC/USDT:USDT',
+    'BTC': 'BTCUSDT',
+    'ETH': 'ETHUSDT', 
+    'SOL': 'SOLUSDT',
 }
 
-# ===== TECHNICAL INDICATORS =====
+# ===== SIMPLE TECHNICAL ANALYSIS =====
 def calculate_rsi(prices, period=14):
-    if len(prices) < period:
+    """Simple RSI calculation without pandas"""
+    if len(prices) < period + 1:
         return 50
-    deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gains = pd.Series(gains).rolling(period).mean()
-    avg_losses = pd.Series(losses).rolling(period).mean()
-    avg_losses = avg_losses.replace(0, 0.001)
-    rs = avg_gains / avg_losses
+    
+    gains = []
+    losses = []
+    
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+    
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    
+    if avg_loss == 0:
+        return 100
+    
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1] if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50
+    return rsi
 
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    if len(prices) < slow:
-        return 0, 0, 0
-    exp1 = pd.Series(prices).ewm(span=fast).mean()
-    exp2 = pd.Series(prices).ewm(span=slow).mean()
-    macd = exp1 - exp2
-    signal_line = macd.ewm(span=signal).mean()
-    histogram = macd - signal_line
-    return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
-
-def calculate_ema(prices, period=20):
+def calculate_sma(prices, period):
+    """Simple Moving Average"""
     if len(prices) < period:
         return prices[-1] if prices else 0
-    return pd.Series(prices).ewm(span=period).mean().iloc[-1]
+    return sum(prices[-period:]) / period
+
+def calculate_ema(prices, period):
+    """Exponential Moving Average"""
+    if len(prices) < period:
+        return prices[-1] if prices else 0
+    
+    ema = prices[0]
+    multiplier = 2 / (period + 1)
+    
+    for price in prices[1:]:
+        ema = (price - ema) * multiplier + ema
+    
+    return ema
+
+# ===== DATA FETCHING =====
+def fetch_binance_data(symbol):
+    """Fetch data from Binance API"""
+    try:
+        url = f"https://api.binance.com/api/v3/klines"
+        params = {
+            'symbol': symbol,
+            'interval': '1h',
+            'limit': 100
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        closes = [float(candle[4]) for candle in data]  # Close prices
+        return closes
+    except Exception as e:
+        print(f"❌ Error fetching {symbol}: {e}")
+        return []
 
 # ===== SIGNAL GENERATION =====
-def generate_signal(symbol_data):
-    prices = symbol_data['close']
-    current_price = prices[-1] if prices else 0
-    
+def analyze_symbol(symbol, prices):
+    """Analyze symbol and generate signals"""
     if len(prices) < 26:
         return {'signal_type': "NONE", 'score': 0}
     
+    current_price = prices[-1]
+    
+    # Calculate indicators
     rsi = calculate_rsi(prices)
-    macd, macd_signal, macd_histogram = calculate_macd(prices)
     ema_fast = calculate_ema(prices, 12)
     ema_slow = calculate_ema(prices, 26)
+    sma_20 = calculate_sma(prices, 20)
     
     signals = []
     score = 0
@@ -95,14 +128,6 @@ def generate_signal(symbol_data):
         signals.append("RSI OVERBOUGHT") 
         score -= 2
     
-    # MACD Signals
-    if macd > macd_signal and macd_histogram > 0:
-        signals.append("MACD BULLISH")
-        score += 1
-    elif macd < macd_signal and macd_histogram < 0:
-        signals.append("MACD BEARISH")
-        score -= 1
-    
     # EMA Signals
     if ema_fast > ema_slow:
         signals.append("EMA UPTREND")
@@ -110,6 +135,14 @@ def generate_signal(symbol_data):
     elif ema_fast < ema_slow:
         signals.append("EMA DOWNTREND")
         score -= 1
+    
+    # Price vs SMA
+    if current_price > sma_20 * 1.02:  # 2% above SMA
+        signals.append("PRICE ABOVE SMA")
+        score -= 1
+    elif current_price < sma_20 * 0.98:  # 2% below SMA
+        signals.append("PRICE BELOW SMA")
+        score += 1
     
     # Determine final signal
     if score >= 3:
@@ -129,7 +162,7 @@ def generate_signal(symbol_data):
         signal_type = "NONE"
     
     return {
-        'symbol': symbol_data['symbol'],
+        'symbol': symbol,
         'price': current_price,
         'rsi': rsi,
         'signals': signals,
@@ -138,99 +171,107 @@ def generate_signal(symbol_data):
         'score': score
     }
 
-# ===== DATA FETCHING =====
-def fetch_market_data():
-    exchange = ccxt.binance({
-        'options': {'defaultType': 'future'},
-        'enableRateLimit': True,
-    })
-    
-    market_data = {}
-    for coin, symbol in SYMBOLS.items():
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=100)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['close'] = df['close'].astype(float)
-            
-            market_data[coin] = {
-                'symbol': symbol,
-                'close': df['close'].tolist(),
-            }
-            time.sleep(0.2)
-        except Exception as e:
-            print(f"Error fetching {coin}: {e}")
-            market_data[coin] = {'symbol': symbol, 'close': []}
-    
-    return market_data
-
 # ===== TELEGRAM NOTIFICATIONS =====
 async def send_telegram_message(message):
+    """Send message to Telegram"""
     try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
-        print(f"✅ Message sent")
-        return True
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("✅ Telegram message sent")
+            return True
+        else:
+            print(f"❌ Telegram error: {response.text}")
+            return False
     except Exception as e:
         print(f"❌ Telegram error: {e}")
         return False
 
 # ===== MAIN MONITORING LOOP =====
 async def monitor_markets():
-    print("🤖 Crypto Signals Bot Started!")
+    """Main monitoring function"""
+    print("🤖 Crypto Signals Bot Started on Render!")
     
     # Send startup message
-    startup_msg = "🤖 <b>Bot Activated on Render!</b>\nMonitoring: BTC, ETH, SOL, DASH, ZEC\nInterval: 5 min"
+    startup_msg = "🤖 <b>Crypto Signals Bot Activated!</b>\n\n"
+    startup_msg += "📊 Monitoring: BTC, ETH, SOL\n"
+    startup_msg += "⏰ Interval: 10 minutes\n"
+    startup_msg += "🚀 Running on Render 24/7"
+    
     await send_telegram_message(startup_msg)
     
     sent_signals = {}
     
     while True:
         try:
-            print(f"🔍 Scanning... {time.strftime('%H:%M:%S')}")
-            market_data = fetch_market_data()
+            print(f"🔍 Scanning markets... {time.strftime('%Y-%m-%d %H:%M:%S')}")
             signals_found = 0
             
-            for coin, data in market_data.items():
-                if data['close']:
-                    analysis = generate_signal(data)
+            for coin, symbol in SYMBOLS.items():
+                prices = fetch_binance_data(symbol)
+                
+                if prices:
+                    analysis = analyze_symbol(coin, prices)
                     
                     if analysis['signal_type'] != 'NONE':
                         signal_key = f"{coin}_{analysis['signal_type']}"
                         
+                        # Avoid spam - send same signal only once per 6 hours
                         if signal_key not in sent_signals or time.time() - sent_signals[signal_key] > 21600:
+                            
                             message = f"""
-🚨 <b>{analysis['symbol']} SIGNAL</b>
-💰 Price: ${analysis['price']:.2f}
-📊 {analysis['final_signal']}
-🎯 Score: {analysis['score']}/4
+🚨 <b>{analysis['symbol']} SIGNAL</b> 🚨
+
+💰 Price: <b>${analysis['price']:.2f}</b>
+📊 Signal: <b>{analysis['final_signal']}</b>
+🎯 Score: <b>{analysis['score']}/4</b>
+
+<b>INDICATORS:</b>
 📈 RSI: {analysis['rsi']:.1f}
-⏰ {time.strftime('%H:%M:%S')}
-                            """
+
+<b>SIGNALS:</b>
+"""
+                            for signal in analysis['signals']:
+                                message += f"• {signal}\n"
+                            
+                            message += f"\n⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                            message += f"\n🌐 Hosted on Render"
+                            
                             success = await send_telegram_message(message)
                             if success:
                                 sent_signals[signal_key] = time.time()
                                 signals_found += 1
             
-            print(f"✅ Cycle complete. Signals found: {signals_found}")
-            await asyncio.sleep(300)  # 5 minutes
+            if signals_found == 0:
+                print("✅ No strong signals this cycle")
+            
+            # Wait 10 minutes before next scan
+            print("💤 Waiting 10 minutes...")
+            await asyncio.sleep(600)
             
         except Exception as e:
-            print(f"❌ Error: {e}")
-            await asyncio.sleep(60)
+            print(f"❌ Error in main loop: {e}")
+            await asyncio.sleep(60)  # Wait 1 minute before retrying
 
 def run_bot():
+    """Run the bot"""
     asyncio.run(monitor_markets())
 
-def start_background_bot():
+def start_bot_background():
     """Start bot in background thread"""
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    print("🤖 Bot started in background thread")
+    print("🤖 Bot started in background")
 
-# Start bot when module loads
-start_background_bot()
+# Start bot when app loads
+start_bot_background()
 
-# For Gunicorn
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)

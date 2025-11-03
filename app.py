@@ -27,8 +27,8 @@ def health():
     return "✅ Healthy - " + time.strftime("%Y-%m-%d %H:%M:%S")
 
 # ===== CONFIGURATION =====
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+TELEGRAM_BOT_TOKEN = os.environ.get('8343470341:AAHwY8NIaHgHLI2uPHnFQrf3m5F98KkQQBc')
+TELEGRAM_CHAT_ID = os.environ.get('601403175')
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:

@@ -2,8 +2,8 @@ import requests
 import time
 import numpy as np
 
-TOKEN = "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН"
-CHAT_ID = "ВСТАВЬ_СЮДА_СВОЙ_CHAT_ID"
+TOKEN = "8343470341:AAHwY8NIaHgHLI2uPHnFQrf3m5F98KkQQBc"
+CHAT_ID = "601403175"
 
 symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DASHUSDT", "ZECUSDT"]
 

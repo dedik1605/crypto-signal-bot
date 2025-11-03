@@ -1,74 +1,85 @@
 import requests
 import time
-import numpy as np
+import pandas as pd
+from datetime import datetime
+from threading import Thread
+from flask import Flask
 
-TOKEN = "8343470341:AAHwY8NIaHgHLI2uPHnFQrf3m5F98KkQQBc"
+# === TELEGRAM + BYBIT НАСТРОЙКИ ===
+TELEGRAM_TOKEN = "8343470341:AAHwY8NIaHgHLI2uPHnFQrf3m5F98KkQQBc"
 CHAT_ID = "601403175"
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DASHUSDT", "ZECUSDT"]
+BYBIT_API_URL = "https://api.bybit.com"
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 
+# === САМ БОТ ===
 def send_message(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": text}
-    requests.post(url, data=data)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
+    requests.post(url, json=payload)
 
-def get_klines(symbol, interval="15"):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}"
-    r = requests.get(url).json()
-    closes = [float(c[4]) for c in r["result"]["list"]]
-    closes.reverse()
-    return closes
+def get_klines(symbol, interval):
+    url = f"{BYBIT_API_URL}/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=200"
+    data = requests.get(url).json()
+    df = pd.DataFrame(data['result']['list'], columns=['open_time','open','high','low','close','volume'])
+    df = df.astype({'close':'float'})
+    return df
 
-def calc_rsi(data, period=14):
-    deltas = np.diff(data)
-    up = deltas.clip(min=0)
-    down = -1 * deltas.clip(max=0)
-    avg_gain = np.mean(up[:period])
-    avg_loss = np.mean(down[:period])
-    rsi_values = []
-    for i in range(period, len(data)):
-        avg_gain = (avg_gain * (period - 1) + up[i - 1]) / period
-        avg_loss = (avg_loss * (period - 1) + down[i - 1]) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else 0
-        rsi = 100 - (100 / (1 + rs))
-        rsi_values.append(rsi)
-    return rsi_values[-1]
+def rsi(df, period=14):
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-def calc_ema(data, period):
-    weights = np.exp(np.linspace(-1., 0., period))
-    weights /= weights.sum()
-    a = np.convolve(data, weights, mode='full')[:len(data)]
-    a[:period] = a[period]
-    return a[-1]
+def macd(df, short=12, long=26, signal=9):
+    ema_short = df['close'].ewm(span=short, adjust=False).mean()
+    ema_long = df['close'].ewm(span=long, adjust=False).mean()
+    macd_line = ema_short - ema_long
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
 
-def calc_macd(data):
-    ema12 = calc_ema(data, 12)
-    ema26 = calc_ema(data, 26)
-    macd = ema12 - ema26
-    return macd
-
-while True:
-    for sym in symbols:
+def bot_worker():
+    last_signal = None
+    intervals = ["1", "5", "15", "30", "60", "240", "D"]
+    while True:
         try:
-            closes = get_klines(sym)
-            rsi = calc_rsi(closes)
-            macd = calc_macd(closes)
-            ema = calc_ema(closes, 50)
-            price = closes[-1]
+            for symbol in SYMBOLS:
+                for interval in intervals:
+                    df = get_klines(symbol, interval)
+                    df["RSI"] = rsi(df)
+                    df["MACD"], df["SIGNAL"] = macd(df)
+                    rsi_now = df["RSI"].iloc[-1]
+                    macd_now = df["MACD"].iloc[-1]
+                    signal_now = df["SIGNAL"].iloc[-1]
 
-            signal = None
-            if rsi < 30 and price > ema and macd > 0:
-                signal = f"🟢 LONG сигнал по {sym}\nRSI: {rsi:.2f}"
-            elif rsi > 70 and price < ema and macd < 0:
-                signal = f"🔴 SHORT сигнал по {sym}\nRSI: {rsi:.2f}"
+                    text = None
+                    if rsi_now < RSI_OVERSOLD and macd_now > signal_now:
+                        text = f"🟢 LONG {symbol} ({interval}) RSI={rsi_now:.2f}"
+                    elif rsi_now > RSI_OVERBOUGHT and macd_now < signal_now:
+                        text = f"🔴 SHORT {symbol} ({interval}) RSI={rsi_now:.2f}"
 
-            if signal:
-                send_message(signal)
+                    if text and text != last_signal:
+                        send_message(f"{datetime.now().strftime('%H:%M:%S')} {text}")
+                        last_signal = text
 
-            time.sleep(3)
+            time.sleep(60)
         except Exception as e:
-            print(e)
-            time.sleep(3)
+            print("Ошибка:", e)
+            time.sleep(10)
 
-    # проверка каждые 15 минут
-    time.sleep(900)
+# === Flask-сервер для Render ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running OK 👌"
+
+if __name__ == '__main__':
+    t = Thread(target=bot_worker)
+    t.start()
+    app.run(host='0.0.0.0', port=10000)
